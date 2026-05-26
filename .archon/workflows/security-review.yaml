@@ -1,0 +1,351 @@
+name: source-guided-security-review
+description: |
+  Use when: Running a source-guided whitebox security review (pentest) on a codebase
+  using scenario-first methodology with OWASP/MITRE-aligned expert families.
+  Triggers: "security review", "pentest", "whitebox review", "vulnerability research",
+  "security audit", "source audit", "code security review".
+  Does: Initialize review run → select expert scope → execute source recon →
+  route recon into scoped scenarios with human approval → execute expert agents
+  per-scenario in isolated subagent sessions → independently triage finding
+  candidates → record final findings with full artifact trail.
+  NOT for: Broad "find anything wrong" scans, self-graded findings, unscoped prompts,
+  bulk analysis without checkpoints, dependency version checks only.
+  Methodology: 1-to-1 replication of Hadrian OpenHack's scenario-first review model.
+  The durable chain is: recon item → routing unit → scenario → scenario result →
+  finding candidate → triage decision → finding.
+  Every scenario is reviewed by its own subagent. Every candidate is triaged by its
+  own independent triage agent. Findings are admitted only through the recorded chain.
+provider: claude
+model: sonnet
+interactive: true
+worktree:
+  enabled: true
+effort: high
+thinking: adaptive
+
+nodes:
+  # ── Phase 1: Initialization ──────────────────────────────────────────
+  - id: init-run
+    bash: |
+      #!/bin/bash
+      set -e
+
+      # The worktree IS the target source code (Archon handles cloning/isolation).
+      # We create the review workspace structure within $ARTIFACTS_DIR.
+      COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+      BRANCH=$(git branch --show-current 2>/dev/null || echo "unknown")
+      REPO_URL=$(git remote get-url origin 2>/dev/null || echo "local")
+      RUN_ID="review-$(date +%Y%m%d-%H%M%S)"
+
+      # Create the directory structure mirroring OpenHack's run layout
+      mkdir -p "$ARTIFACTS_DIR"/{recon-output,scenarios/{backlog,finished},finding-candidates,finding-triage/{prompts,decisions},findings,logs}
+
+      # Write run-config.yaml
+      cat > "$ARTIFACTS_DIR/run-config.yaml" <<YAML
+      repo_url: "$REPO_URL"
+      run_id: "$RUN_ID"
+      commit: "$COMMIT"
+      branch: "$BRANCH"
+      created_at: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      status: initialized
+      expert_scope:
+        mode: all
+        experts: []
+      quality_gates:
+        require_all_backlog_finished: true
+        scenario_minimum: 1
+      YAML
+
+      # Write initial run state
+      echo '{"phase":"initialized","timestamp":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' > "$ARTIFACTS_DIR/run-state.jsonl"
+
+      # Log the event
+      echo '{"event":"init_run","run_id":"'"$RUN_ID"'","repo_url":"'"$REPO_URL"'","commit":"'"$COMMIT"'","branch":"'"$BRANCH"'","timestamp":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' >> "$ARTIFACTS_DIR/logs/events.jsonl"
+
+      echo "$ARTIFACTS_DIR"
+    timeout: 30000
+
+  # ── Phase 2: Expert Scope Selection ──────────────────────────────────
+  - id: select-expert-scope
+    prompt: |
+      You are configuring expert scope for a source-guided security review.
+
+      Available OWASP/MITRE-aligned expert families:
+
+      | # | Expert ID | Title |
+      |---|-----------|-------|
+      | 1 | `broken-access-control` | A01:2025 - Broken Access Control |
+      | 2 | `security-misconfiguration` | A02:2025 - Security Misconfiguration |
+      | 3 | `software-supply-chain-failures` | A03:2025 - Software Supply Chain Failures |
+      | 4 | `cryptographic-failures` | A04:2025 - Cryptographic Failures |
+      | 5 | `injection` | A05:2025 - Injection |
+      | 6 | `memory-buffer-boundary-errors` | CWE-119 - Memory/Buffer Boundary Errors |
+      | 7 | `insecure-design` | A06:2025 - Insecure Design |
+      | 8 | `authentication-failures` | A07:2025 - Authentication Failures |
+      | 9 | `software-data-integrity-failures` | A08:2025 - Software/Data Integrity Failures |
+      | 10 | `sensitive-information-exposure` | CWE-200 - Sensitive Information Exposure |
+      | 11 | `path-traversal-unrestricted-upload` | CWE-22/CWE-434 - Path Traversal & Unrestricted Upload |
+      | 12 | `unrestricted-resource-consumption` | API4:2023/CWE-770 - Unrestricted Resource Consumption |
+
+      User request: $ARGUMENTS
+
+      Select which expert families should be activated for this review.
+      If the user did not specify a subset, select ALL experts (recommended for comprehensive review).
+      If the user mentioned specific concerns, select the relevant experts plus any closely related families.
+
+      Return a JSON object with your selection.
+    model: haiku
+    allowed_tools: []
+    output_format:
+      type: object
+      properties:
+        selected_experts:
+          type: array
+          items:
+            type: string
+          minItems: 1
+        mode:
+          type: string
+          enum: [all, selected]
+        rationale:
+          type: string
+      required: [selected_experts, mode, rationale]
+    depends_on: [init-run]
+
+  # ── Phase 3: Source Reconnaissance ───────────────────────────────────
+  - id: run-recon
+    command: source-recon
+    depends_on: [select-expert-scope]
+    context: fresh
+    idle_timeout: 600000
+
+  # ── Phase 4: Scenario Routing ────────────────────────────────────────
+  - id: route-scenarios
+    command: scenario-router
+    depends_on: [run-recon]
+    context: fresh
+    idle_timeout: 600000
+
+  # ── Phase 5: Human Approval of Backlog ───────────────────────────────
+  - id: approve-backlog
+    approval:
+      message: |
+        **Scenario Backlog Review**
+
+        Review the scenario backlog above. Verify:
+        - Each scenario has exactly one routing unit + one expert + one proof question
+        - Proof questions are specific and testable (not vague "find anything wrong")
+        - All mandatory routing unit/expert pairs are represented
+        - Coverage decisions explain any out-of-scope items
+        - The backlog width is sufficient for the recon evidence
+
+        Approve to proceed with scenario execution. Reject to re-route with feedback.
+      capture_response: true
+      on_reject:
+        prompt: |
+          The human reviewer rejected the scenario backlog. Revise the routing based on this feedback:
+
+          Feedback: $REJECTION_REASON
+
+          Read the current backlog from $ARTIFACTS_DIR/scenarios/backlog/, the routing units from $ARTIFACTS_DIR/recon-output/routing-units.jsonl, and re-route with the feedback incorporated. Write the revised backlog.
+        max_attempts: 3
+    depends_on: [route-scenarios]
+
+  # ── Phase 6: Scenario Expert Execution (loop, one subagent per scenario) ──
+  - id: execute-scenarios
+    loop:
+      prompt: |
+        FRESH session — no memory of prior iterations. Read state from artifacts.
+
+        Read the scenario execution tracking file: $ARTIFACTS_DIR/scenarios/execution-state.json
+        This file tells you which scenario to review next.
+
+        Read the scenario prompt for the current scenario from:
+        $ARTIFACTS_DIR/scenarios/backlog/{scenario_id}.md
+
+        Read the shared protocol from: .archon/commands/shared-protocol.md
+        Read the expert manifest for the assigned expert from: .archon/commands/expert-{expert_id}.md
+
+        Then:
+        1. Map the reachable entrypoint from the scenario's target path
+        2. Trace attacker-controlled data from source to sink
+        3. Check guards in the context where the sink consumes data
+        4. Decide: verified, candidate, rejected, or needs_context
+        5. Check sibling sinks with the same root cause
+        6. Write the result to $ARTIFACTS_DIR/scenarios/finished/{scenario_id}.json
+
+        The result JSON must follow the scenario-result schema:
+        - scenario_id, review_mode: "per-scenario-subagent", subagent_id (unique), scenario_prompt_sha256
+        - status: verified|candidate|rejected|needs_context
+        - expert, summary, evidence (with path/line/snippet/note for each item)
+        - proof_obligations (one result per required obligation)
+        - surface_class_coverage, same_root_expansion, candidate_queue_entries
+        - findings: verified finding candidates only (each with title, severity, target_path,
+          attacker_role, preconditions, non_technical_summary, summary, evidence,
+          attack_chain, example_attack, impact, impact_analysis, attacker_use,
+          recommended_fix, validation_notes)
+
+        After recording the result, update execution-state.json to mark the scenario finished
+        and identify the next unfinished scenario.
+
+        When all scenarios are finished: <promise>ALL_SCENARIOS_COMPLETE</promise>
+        When there are still unfinished scenarios but you've completed this one: <promise>SCENARIO_DONE</promise>
+      until: ALL_SCENARIOS_COMPLETE
+      max_iterations: 100
+      fresh_context: true
+    depends_on: [approve-backlog]
+    idle_timeout: 600000
+
+  # ── Phase 7: Create Finding Candidate Backlog ────────────────────────
+  - id: create-candidate-backlog
+    script: create-candidate-backlog
+    runtime: uv
+    timeout: 30000
+    depends_on: [execute-scenarios]
+
+  # ── Phase 8: Finding Triage (loop, one independent agent per candidate) ──
+  - id: triage-findings
+    loop:
+      prompt: |
+        FRESH session — no memory of prior iterations. Read state from artifacts.
+
+        You are the INDEPENDENT finding-triage agent. You are NOT the scenario expert who proposed this finding.
+        Your job is to decide whether each finding candidate becomes a final reportable finding.
+
+        Read the triage state: $ARTIFACTS_DIR/finding-triage/triage-state.json
+        This tells you which candidate to triage next.
+
+        Read the candidate: $ARTIFACTS_DIR/finding-candidates/{candidate_id}.json
+        Read the scenario result that produced it: $ARTIFACTS_DIR/scenarios/finished/{scenario_id}.json
+        Read the shared protocol: .archon/commands/shared-protocol.md
+
+        For the current candidate, independently verify:
+        1. **Evidence quality**: Does the evidence prove reachability, attacker control, sink/boundary, missing guard, and concrete impact?
+        2. **Reportability**: Is this a real vulnerability or a false positive?
+        3. **Deduplication**: Check existing final findings in $ARTIFACTS_DIR/findings/ for duplicates or merges.
+        4. **Severity due diligence**: Do NOT accept the scenario expert's severity by default. Re-rate from:
+           - Minimum attacker role and whether that role already owns the claimed impact
+           - Required preconditions, configuration, feature flags, deployment defaults
+           - Exploit complexity, repeatability, timing dependencies
+           - Confidentiality, integrity, availability impact including blast radius
+           - Compensating controls or framework behavior at the exact sink context
+        5. **Confidence**: high, medium, or low based on evidence completeness
+
+        Write your triage decision to: $ARTIFACTS_DIR/finding-triage/decisions/{candidate_id}.json
+
+        The decision JSON must follow the finding-triage schema:
+        - candidate_id, review_mode: "per-finding-triage-agent", triage_agent_id (unique), triage_prompt_sha256
+        - decision: accepted|downgraded|duplicate|rejected|needs_context
+        - summary, final_severity, severity_rationale, confidence
+        - evidence_assessment, evidence_gaps, required_changes
+        - dedupe_notes, duplicate_of (if applicable)
+        - finding: revised finding object (for accepted/downgraded only)
+
+        After recording the decision, update triage-state.json:
+        - Increment triaged count
+        - Set next_candidate_id to the next unfinished candidate
+        - If no candidates remain, set status to "complete"
+
+        If the decision is "accepted" or "downgraded", also write the final finding
+        Markdown to: $ARTIFACTS_DIR/findings/{candidate_id}.md
+
+        When all candidates are triaged: <promise>ALL_CANDIDATES_TRIAGED</promise>
+        When this candidate is done but more remain: <promise>CANDIDATE_TRIAGED</promise>
+      until: ALL_CANDIDATES_TRIAGED
+      max_iterations: 100
+      fresh_context: true
+    depends_on: [create-candidate-backlog]
+    idle_timeout: 600000
+
+  # ── Phase 9: Human Approval of Findings ──────────────────────────────
+  - id: approve-findings
+    approval:
+      message: |
+        **Finding Triage Review**
+
+        Review the triage decisions above. Verify:
+        - Accepted findings have strong, specific evidence
+        - Rejected findings are correctly dismissed with clear rationale
+        - Severity ratings are appropriate (not inflated)
+        - Duplicates are correctly identified
+        - Downgraded findings have proper severity rationale
+
+        Approve to record final findings. Reject to re-triage with feedback.
+      capture_response: true
+      on_reject:
+        prompt: |
+          The human reviewer rejected the triage decisions. Re-triage based on this feedback:
+
+          Feedback: $REJECTION_REASON
+
+          Read the existing triage decisions from $ARTIFACTS_DIR/finding-triage/decisions/
+          and the relevant candidates from $ARTIFACTS_DIR/finding-candidates/.
+          Revise the decisions that the human flagged, then update the decision files.
+        max_attempts: 3
+    depends_on: [triage-findings]
+
+  # ── Phase 10: Record Final Findings ──────────────────────────────────
+  - id: record-findings
+    command: record-findings
+    depends_on: [approve-findings]
+    context: fresh
+    idle_timeout: 300000
+
+  # ── Phase 11: Validate Run ───────────────────────────────────────────
+  - id: validate-run
+    bash: |
+      #!/bin/bash
+      set -e
+      WORKSPACE="$ARTIFACTS_DIR"
+
+      echo "=== Security Review Validation ==="
+      echo ""
+
+      # Count artifacts
+      RECON_ITEMS=$(wc -l < "$WORKSPACE/recon-output/recon-items.jsonl" 2>/dev/null || echo 0)
+      ROUTING_UNITS=$(wc -l < "$WORKSPACE/recon-output/routing-units.jsonl" 2>/dev/null || echo 0)
+      BACKLOG_SCENARIOS=$(ls -1 "$WORKSPACE/scenarios/backlog"/S*.json 2>/dev/null | wc -l)
+      FINISHED_SCENARIOS=$(ls -1 "$WORKSPACE/scenarios/finished"/S*.json 2>/dev/null | wc -l)
+      CANDIDATES=$(ls -1 "$WORKSPACE/finding-candidates"/S*-F*.json 2>/dev/null | wc -l)
+      TRIAGE_DECISIONS=$(ls -1 "$WORKSPACE/finding-triage/decisions"/S*-F*.json 2>/dev/null | wc -l)
+      FINDINGS=$(ls -1 "$WORKSPACE/findings"/*.md 2>/dev/null | wc -l)
+
+      echo "Artifact counts:"
+      echo "  Recon items:        $RECON_ITEMS"
+      echo "  Routing units:      $ROUTING_UNITS"
+      echo "  Backlog scenarios:  $BACKLOG_SCENARIOS"
+      echo "  Finished scenarios: $FINISHED_SCENARIOS"
+      echo "  Finding candidates: $CANDIDATES"
+      echo "  Triage decisions:   $TRIAGE_DECISIONS"
+      echo "  Final findings:     $FINDINGS"
+      echo ""
+
+      # Check coverage: all backlog scenarios should have finished results
+      if [ "$FINISHED_SCENARIOS" -lt "$BACKLOG_SCENARIOS" ]; then
+        echo "⚠ WARNING: Not all backlog scenarios have finished results ($FINISHED_SCENARIOS/$BACKLOG_SCENARIOS)"
+      else
+        echo "✓ All backlog scenarios have finished results"
+      fi
+
+      # Check coverage: all candidates should have triage decisions
+      if [ "$TRIAGE_DECISIONS" -lt "$CANDIDATES" ]; then
+        echo "⚠ WARNING: Not all candidates have triage decisions ($TRIAGE_DECISIONS/$CANDIDATES)"
+      else
+        echo "✓ All finding candidates have triage decisions"
+      fi
+
+      # Check that final findings have matching accepted/downgraded triage decisions
+      echo ""
+      echo "Final findings:"
+      for finding_file in "$WORKSPACE/findings"/*.md; do
+        [ -f "$finding_file" ] || continue
+        echo "  - $(basename "$finding_file")"
+      done
+
+      # Log the validation event
+      echo '{"event":"validate_run","findings":'"$FINDINGS"',"scenarios":'"$FINISHED_SCENARIOS"',"candidates":'"$CANDIDATES"',"timestamp":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' >> "$WORKSPACE/logs/events.jsonl"
+
+      echo ""
+      echo "=== Validation Complete ==="
+    timeout: 15000
+    depends_on: [record-findings]
