@@ -1,4 +1,4 @@
-name: source-guided-security-review
+name: security-review
 description: |
   Use when: Running a source-guided whitebox security review (pentest) on a codebase
   using scenario-first methodology with OWASP/MITRE-aligned expert families.
