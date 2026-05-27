@@ -13,10 +13,12 @@ Archon Workflow Manager
 Usage:
   $0 install <workflow-name> <target-project-path> [--symlink]
   $0 uninstall <workflow-name> <target-project-path>
-  $0 list
+  $0 list [target-project-path] [--installed | --uninstalled]
 
 Options:
-  --symlink    Create symbolic links instead of copying files (best for local development).
+  --symlink        Create symbolic links instead of copying files (best for local development).
+  --installed      Filter by installed workflows (only applicable when target-project-path is provided).
+  --uninstalled    Filter by uninstalled workflows (only applicable when target-project-path is provided).
 
 Examples:
   # Copy the security review workflow to a target project
@@ -36,13 +38,63 @@ log_success() { echo -e "\033[0;32m[SUCCESS]\033[0m $*"; }
 log_error() { echo -e "\033[0;31m[ERROR]\033[0m $*" >&2; }
 
 list_workflows() {
-    echo "Available workflows:"
+    local target="${1:-}"
+    local filter="${2:-}"
+
+    if [ -z "$target" ]; then
+        # Default behavior: list all available workflows in the repository
+        echo "Available workflows in this repository:"
+        if [ -d "$WORKFLOWS_DIR" ]; then
+            for dir in "$WORKFLOWS_DIR"/*/; do
+                if [ -d "$dir" ]; then
+                    echo "  - $(basename "$dir")"
+                fi
+            done
+        else
+            echo "No workflows found in ${WORKFLOWS_DIR}"
+        fi
+        return
+    fi
+
+    # Target path provided. Check installation status.
+    if [ ! -d "$target" ]; then
+        log_error "Target project path '${target}' does not exist."
+        exit 1
+    fi
+
+    local dest_archon="${target}/.archon"
+    echo "Workflow status in '${target}':"
+
     if [ -d "$WORKFLOWS_DIR" ]; then
+        local found=false
         for dir in "$WORKFLOWS_DIR"/*/; do
             if [ -d "$dir" ]; then
-                echo "  - $(basename "$dir")"
+                local name
+                name=$(basename "$dir")
+                local is_installed=false
+                if [ -f "${dest_archon}/workflows/${name}.yaml" ]; then
+                    is_installed=true
+                fi
+
+                # Apply filters
+                if [ "$filter" = "--installed" ] && [ "$is_installed" = false ]; then
+                    continue
+                fi
+                if [ "$filter" = "--uninstalled" ] && [ "$is_installed" = true ]; then
+                    continue
+                fi
+
+                found=true
+                if [ "$is_installed" = true ]; then
+                    echo -e "  - \033[0;32m[Installed]\033[0m     ${name}"
+                else
+                    echo -e "  - \033[0;33m[Not Installed]\033[0m ${name}"
+                fi
             fi
         done
+        if [ "$found" = false ]; then
+            echo "  No workflows matched the filter."
+        fi
     else
         echo "No workflows found in ${WORKFLOWS_DIR}"
     fi
@@ -188,7 +240,16 @@ shift
 
 case "$CMD" in
     list)
-        list_workflows
+        TARGET=""
+        FILTER=""
+        if [ $# -ge 1 ]; then
+            TARGET="$1"
+            shift
+        fi
+        if [ $# -ge 1 ]; then
+            FILTER="$1"
+        fi
+        list_workflows "$TARGET" "$FILTER"
         ;;
     install)
         if [ $# -lt 2 ]; then usage; fi
