@@ -1,0 +1,248 @@
+name: archon-qa-ux-audit
+description: |
+  Use when: Running a deterministic UX/UI/accessibility audit on a running web application. Triggers: "UX audit", "UI audit", "accessibility check", "heuristic evaluation", "UX regression", "usability check", "a11y audit", "QA UI audit", "design review". Does: Crawl pages → capture screenshots & DOM → run rule-based catalog checks (WCAG 2.2 via axe-core, Nielsen 10 heuristics, AI-slop fingerprints, usability anti-patterns) → AI judges ambiguous findings with published-source citations → synthesize ranked fix plan with evidence. NOT for: Functional testing, E2E test generation, performance benchmarking, security review, exploratory testing, or any task requiring live browser interaction beyond static capture. Read-only workflow — never modifies the target app or its codebase. Deterministic: same URL, same app version → same catalog results every run. The only non-deterministic step is the AI judge, which only evaluates ambiguous findings the rules couldn't resolve, and its output is constrained by output_format.
+
+provider: claude
+model: sonnet
+worktree:
+  enabled: false  # read-only audit — no code changes, no worktree needed
+
+nodes:
+  # ── Phase 1: Capture ──────────────────────────────────────────────────
+  # Crawl the target app, capture screenshots + DOM + accessibility snapshots.
+  # Deterministic: same URL → same pages, same screenshots.
+
+  - id: init-audit
+    bash: |
+      #!/bin/bash
+      set -e
+      AUDIT_DIR="$ARTIFACTS_DIR"
+      RUN_ID="ux-audit-$(date +%Y%m%d-%H%M%S)"
+
+      mkdir -p "$AUDIT_DIR"/{captures,checks/{axe-core,heuristic,ai-slop,usability},judge,report,evidence}
+
+      # Parse target URL from ARGUMENTS (first http/https token) or fail
+      TARGET_URL=$(echo "$ARGUMENTS" | grep -oE 'https?://[^ ]+' | head -1)
+      if [ -z "$TARGET_URL" ]; then
+        echo "ERROR: No URL found in arguments. Pass the target app URL." >&2
+        exit 1
+      fi
+
+      # Write run metadata
+      cat > "$AUDIT_DIR/run-metadata.json" <<JSON
+      {
+        "run_id": "$RUN_ID",
+        "target_url": "$TARGET_URL",
+        "started_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+        "status": "initialized"
+      }
+      JSON
+
+      echo "$TARGET_URL"
+    timeout: 15000
+
+  - id: crawl-pages
+    command: qa-ux-crawl-pages
+    depends_on: [init-audit]
+    idle_timeout: 300000
+
+  # ── Phase 2: Deterministic Catalog Checks ──────────────────────────────
+  # All rule-based checks run in parallel. No AI. Fully deterministic.
+
+  - id: run-axe-core
+    bash: |
+      #!/bin/bash
+      set -e
+      AUDIT_DIR="$ARTIFACTS_DIR"
+      CAPTURES_DIR="$AUDIT_DIR/captures"
+
+      # Check for pages manifest
+      if [ ! -f "$CAPTURES_DIR/pages.json" ]; then
+        echo '{"error": "No pages.json found", "results": []}'
+        exit 0
+      fi
+
+      # Check if npx is available
+      if ! command -v npx &>/dev/null; then
+        echo '{"error": "npx not available — axe-core skipped", "results": []}'
+        exit 0
+      fi
+
+      # Run axe-core on each captured page via Playwright
+      # Uses @axe-core/playwright to audit saved HTML files
+      RESULTS_FILE="$AUDIT_DIR/checks/axe-core/results.json"
+      PAGES=$(python3 -c "import json; pages=json.load(open('$CAPTURES_DIR/pages.json')); print(' '.join(p['url'] for p in pages))")
+
+      # Write a temporary Node script that runs axe on each page
+      cat > "$AUDIT_DIR/_axe_runner.mjs" << 'SCRIPT'
+      import { chromium } from 'playwright';
+      import AxeBuilder from '@axe-core/playwright';
+      import { writeFileSync, readFileSync } from 'fs';
+
+      const pages = JSON.parse(readFileSync(process.env.PAGES_FILE, 'utf8'));
+      const results = [];
+
+      (async () => {
+        const browser = await chromium.launch({ headless: true });
+        for (const page of pages) {
+          try {
+            const ctx = await browser.newPage();
+            await ctx.goto(page.url, { waitUntil: 'networkidle', timeout: 30000 });
+            const result = await new AxeBuilder({ page: ctx })
+              .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'])
+              .analyze();
+            results.push({
+              url: page.url,
+              violations: result.violations.map(v => ({
+                id: v.id,
+                impact: v.impact,
+                description: v.description,
+                helpUrl: v.helpUrl,
+                nodes: v.nodes.map(n => ({
+                  html: n.html,
+                  target: n.target
+                }))
+              }))
+            });
+            await ctx.close();
+          } catch (e) {
+            results.push({ url: page.url, error: e.message });
+          }
+        }
+        await browser.close();
+        writeFileSync(process.env.OUT_FILE, JSON.stringify(results, null, 2));
+      })();
+      SCRIPT
+
+      # Write pages list as JSON for the runner
+      PAGES_FILE="$AUDIT_DIR/_pages_for_axe.json"
+      python3 -c "import json; json.dump(json.load(open('$CAPTURES_DIR/pages.json')), open('$PAGES_FILE','w'))"
+
+      OUT_FILE="$RESULTS_FILE"
+      cd "$AUDIT_DIR" && npx --yes playwright install chromium 2>/dev/null && NODE_PATH="$AUDIT_DIR/node_modules" node "$AUDIT_DIR/_axe_runner.mjs" 2>/dev/null || echo '{"error": "axe-core runner failed — Playwright/axe not available", "results": []}' > "$RESULTS_FILE"
+
+      # Fallback: if results file is empty or missing
+      if [ ! -s "$RESULTS_FILE" ]; then
+        echo '{"error": "axe-core produced no results", "results": []}' > "$RESULTS_FILE"
+      fi
+
+      # Count violations for quick summary
+      python3 -c "
+      import json
+      data = json.load(open('$RESULTS_FILE'))
+      if isinstance(data, dict) and 'error' in data:
+          print(f'axe-core: {data[\"error\"]}')
+      else:
+          total = sum(len(p.get('violations', [])) for p in data if isinstance(p, dict))
+          print(f'axe-core: {total} violations across {len(data)} pages')
+      " 2>/dev/null || echo "axe-core: results saved"
+    timeout: 120000
+    depends_on: [crawl-pages]
+
+  - id: run-heuristic-checks
+    script: run-heuristic-checks
+    runtime: uv
+    timeout: 60000
+    depends_on: [crawl-pages]
+
+  - id: run-ai-slop-checks
+    script: run-ai-slop-checks
+    runtime: uv
+    timeout: 60000
+    depends_on: [crawl-pages]
+
+  - id: run-usability-checks
+    script: run-usability-checks
+    runtime: uv
+    timeout: 60000
+    depends_on: [crawl-pages]
+
+  # ── Phase 3: Aggregate Deterministic Results ───────────────────────────
+
+  - id: aggregate-checks
+    script: aggregate-checks
+    runtime: uv
+    timeout: 30000
+    depends_on: [run-axe-core, run-heuristic-checks, run-ai-slop-checks, run-usability-checks]
+    trigger_rule: none_failed_min_one_success
+
+  # ── Phase 4: AI Judge for Ambiguous Findings ──────────────────────────
+  # The only non-deterministic step. AI reviews findings that need judgment
+  # calls (e.g., "is this vague label actually vague in context?"). Cites
+  # published sources (WCAG, NN/g, Nielsen, Krug, ISO 9241).
+
+  - id: judge-findings
+    command: qa-ux-judge-findings
+    depends_on: [aggregate-checks]
+    context: fresh
+    model: sonnet
+    idle_timeout: 600000
+
+  # ── Phase 5: Synthesize Ranked Fix Plan ────────────────────────────────
+  # Combines deterministic results + judged results into a ranked fix plan
+  # with severity, category, evidence, remediation, and source citations.
+
+  - id: synthesize-report
+    command: qa-ux-synthesize-report
+    depends_on: [judge-findings]
+    context: fresh
+    model: sonnet
+    idle_timeout: 300000
+
+  # ── Phase 6: Validation & Summary ─────────────────────────────────────
+
+  - id: validate-audit
+    bash: |
+      #!/bin/bash
+      set -e
+      AUDIT_DIR="$ARTIFACTS_DIR"
+
+      echo "=== UX/UI Audit Validation ==="
+      echo ""
+
+      # Count check artifacts
+      AXE=$(python3 -c "import json; d=json.load(open('$AUDIT_DIR/checks/axe-core/results.json')); print(len(d) if isinstance(d,list) else 0)" 2>/dev/null || echo "0")
+      HEURISTIC=$(python3 -c "import json; d=json.load(open('$AUDIT_DIR/checks/heuristic/results.json')); print(len(d.get('findings',[])))" 2>/dev/null || echo "0")
+      AISLOP=$(python3 -c "import json; d=json.load(open('$AUDIT_DIR/checks/ai-slop/results.json')); print(len(d.get('findings',[])))" 2>/dev/null || echo "0")
+      USABILITY=$(python3 -c "import json; d=json.load(open('$AUDIT_DIR/checks/usability/results.json')); print(len(d.get('findings',[])))" 2>/dev/null || echo "0")
+
+      echo "Check category results:"
+      echo "  axe-core (a11y):   $AXE page(s) audited"
+      echo "  heuristic checks:  $HEURISTIC finding(s)"
+      echo "  AI-slop checks:    $AISLOP finding(s)"
+      echo "  usability checks:  $USABILITY finding(s)"
+
+      # Check for aggregated results
+      if [ -f "$AUDIT_DIR/checks/aggregate-results.json" ]; then
+        TOTAL=$(python3 -c "import json; d=json.load(open('$AUDIT_DIR/checks/aggregate-results.json')); print(d.get('total_findings',0))" 2>/dev/null || echo "?")
+        PASS=$(python3 -c "import json; d=json.load(open('$AUDIT_DIR/checks/aggregate-results.json')); print(d.get('pass_count',0))" 2>/dev/null || echo "?")
+        FAIL=$(python3 -c "import json; d=json.load(open('$AUDIT_DIR/checks/aggregate-results.json')); print(d.get('fail_count',0))" 2>/dev/null || echo "?")
+        echo ""
+        echo "Aggregated: $TOTAL total findings ($PASS pass, $FAIL fail)"
+      fi
+
+      # Check for judge results
+      if [ -f "$AUDIT_DIR/judge/judged-results.json" ]; then
+        JUDGED=$(python3 -c "import json; d=json.load(open('$AUDIT_DIR/judge/judged-results.json')); print(len(d.get('judged_findings',[])))" 2>/dev/null || echo "?")
+        echo "Judged findings: $JUDGED"
+      fi
+
+      # Check for final report
+      if [ -f "$AUDIT_DIR/report/ux-audit-report.md" ]; then
+        LINES=$(wc -l < "$AUDIT_DIR/report/ux-audit-report.md")
+        echo "Report: $LINES lines written"
+      fi
+
+      # Update run metadata
+      python3 -c "
+      import json, datetime
+      meta = json.load(open('$AUDIT_DIR/run-metadata.json'))
+      meta['status'] = 'completed'
+      meta['completed_at'] = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+      json.dump(meta, open('$AUDIT_DIR/run-metadata.json', 'w'), indent=2)
+      " 2>/dev/null
+
+      echo ""
+      echo "=== Validation Complete ==="
+    timeout: 15000
+    depends_on: [synthesize-report]

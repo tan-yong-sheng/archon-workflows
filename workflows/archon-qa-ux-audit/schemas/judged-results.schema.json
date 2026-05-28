@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Judged Results",
+  "description": "Output schema for the AI judge node in the UX audit pipeline",
+  "type": "object",
+  "required": ["judged_findings", "summary"],
+  "properties": {
+    "judged_findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "original_check", "verdict", "band", "title", "description", "source", "remediation"],
+        "properties": {
+          "id": { "type": "string" },
+          "original_check": { "type": "string" },
+          "verdict": {
+            "type": "string",
+            "enum": ["confirmed", "dismissed", "downgraded", "needs_context"]
+          },
+          "band": {
+            "type": "string",
+            "enum": ["ux", "ui-risk"]
+          },
+          "subtype": {
+            "type": ["string", "null"],
+            "enum": ["understand", "decide", "act", "recover", null]
+          },
+          "severity": {
+            "type": ["string", "null"],
+            "enum": ["critical", "major", "minor", null]
+          },
+          "title": { "type": "string" },
+          "description": { "type": "string" },
+          "source": { "type": "string" },
+          "evidence": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "remediation": { "type": "string" },
+          "pages_affected": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["confirmed", "dismissed", "downgraded", "needs_context", "by_severity", "by_band", "by_subtype"],
+      "properties": {
+        "confirmed": { "type": "integer" },
+        "dismissed": { "type": "integer" },
+        "downgraded": { "type": "integer" },
+        "needs_context": { "type": "integer" },
+        "by_severity": {
+          "type": "object",
+          "properties": {
+            "critical": { "type": "integer" },
+            "major": { "type": "integer" },
+            "minor": { "type": "integer" }
+          }
+        },
+        "by_band": {
+          "type": "object",
+          "properties": {
+            "ux": { "type": "integer" },
+            "ui-risk": { "type": "integer" }
+          }
+        },
+        "by_subtype": {
+          "type": "object",
+          "properties": {
+            "understand": { "type": "integer" },
+            "decide": { "type": "integer" },
+            "act": { "type": "integer" },
+            "recover": { "type": "integer" }
+          }
+        }
+      }
+    }
+  }
+}

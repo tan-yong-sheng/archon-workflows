@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "UX Audit Finding",
+  "description": "Schema for a single finding in the UX/UI audit pipeline",
+  "type": "object",
+  "required": ["id", "check", "verdict", "severity", "band", "title", "description", "source", "needs_judgment", "remediation"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^(AXE|HEURISTIC|AISLOP|USAB)-[0-9]{3}$",
+      "description": "Unique finding identifier"
+    },
+    "check": {
+      "type": "string",
+      "description": "Check category/subcategory, e.g. accessibility/axe-core/color-contrast"
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["pass", "fail", "skip"]
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["critical", "major", "minor"]
+    },
+    "band": {
+      "type": "string",
+      "enum": ["ux", "ui-risk"],
+      "description": "Reader-facing bucket: UX issues vs UI risk signals"
+    },
+    "subtype": {
+      "type": ["string", "null"],
+      "enum": ["understand", "decide", "act", "recover", null],
+      "description": "UX subtype (only for ux band). null for ui-risk band."
+    },
+    "title": {
+      "type": "string",
+      "maxLength": 200
+    },
+    "description": {
+      "type": "string"
+    },
+    "source": {
+      "type": "string",
+      "description": "Published source citation, or 'Self-evident anti-pattern (no citation needed)'"
+    },
+    "needs_judgment": {
+      "type": "boolean",
+      "description": "Whether this finding requires AI judgment or is auto-confirmed"
+    },
+    "remediation": {
+      "type": "string"
+    },
+    "pages_affected": {
+      "type": "array",
+      "items": { "type": "string", "format": "uri" }
+    },
+    "evidence": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Paths to screenshot/DOM evidence files"
+    },
+    "affected_nodes": {
+      "type": "array",
+      "description": "Specific DOM nodes affected (axe-core format)"
+    }
+  }
+}

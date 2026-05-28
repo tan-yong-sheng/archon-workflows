@@ -2,3 +2,5 @@
 .pi-lens/
 .claude/
 .archon/
+__pycache__/
+*.pyc
