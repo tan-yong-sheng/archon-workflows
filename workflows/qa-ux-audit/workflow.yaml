@@ -1,4 +1,4 @@
-name: archon-qa-ux-audit
+name: qa-ux-audit
 description: |
   Use when: Running a deterministic UX/UI/accessibility audit on a running web application. Triggers: "UX audit", "UI audit", "accessibility check", "heuristic evaluation", "UX regression", "usability check", "a11y audit", "QA UI audit", "design review". Does: Crawl pages → capture screenshots & DOM → run rule-based catalog checks (WCAG 2.2 via axe-core, Nielsen 10 heuristics, AI-slop fingerprints, usability anti-patterns) → AI judges ambiguous findings with published-source citations → synthesize ranked fix plan with evidence. NOT for: Functional testing, E2E test generation, performance benchmarking, security review, exploratory testing, or any task requiring live browser interaction beyond static capture. Read-only workflow — never modifies the target app or its codebase. Deterministic: same URL, same app version → same catalog results every run. The only non-deterministic step is the AI judge, which only evaluates ambiguous findings the rules couldn't resolve, and its output is constrained by output_format.
 

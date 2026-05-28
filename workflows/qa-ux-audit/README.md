@@ -1,4 +1,4 @@
-# archon-qa-ux-audit
+# qa-ux-audit
 
 Deterministic UX/UI/accessibility audit workflow for Archon.
 
@@ -85,7 +85,7 @@ Self-evident anti-patterns (lorem ipsum, "Coming soon", placeholder names) don't
 ## Usage
 
 ```bash
-archon workflow run archon-qa-ux-audit "Audit https://my-app.example.com"
+archon workflow run qa-ux-audit "Audit https://my-app.example.com"
 ```
 
 The argument MUST contain the target URL (http:// or https://).
